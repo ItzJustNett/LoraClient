@@ -1,8 +1,9 @@
 import Store from 'electron-store';
-import { app, shell } from 'electron';
+import { shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { AppSettings } from '../../shared/types';
+import { getAppPathSafe } from '../utils/app-path';
 
 const defaultSettings: AppSettings = {
   minecraftDir: '',
@@ -38,11 +39,11 @@ export class SettingsService {
   private getDefaultMinecraftDir(): string {
     const platform = process.platform;
     if (platform === 'win32') {
-      return path.join(app.getPath('appData'), '.minecraft');
+      return path.join(getAppPathSafe('appData'), '.minecraft');
     } else if (platform === 'darwin') {
-      return path.join(app.getPath('home'), 'Library', 'Application Support', 'minecraft');
+      return path.join(getAppPathSafe('home'), 'Library', 'Application Support', 'minecraft');
     } else {
-      return path.join(app.getPath('home'), '.minecraft');
+      return path.join(getAppPathSafe('home'), '.minecraft');
     }
   }
 
@@ -88,7 +89,7 @@ export class SettingsService {
   }
 
   getLoraClientDir(): string {
-    return path.join(app.getPath('userData'));
+    return path.join(getAppPathSafe('userData'));
   }
 
   async openLoraClientFolder(): Promise<void> {

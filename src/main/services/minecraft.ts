@@ -2,8 +2,8 @@ import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { app } from 'electron';
 import { MinecraftVersion, DownloadProgress } from '../../shared/types';
+import { getAppPathSafe } from '../utils/app-path';
 
 const VERSION_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
 const RESOURCES_URL = 'https://resources.download.minecraft.net';
@@ -20,6 +20,8 @@ export interface VersionDetails {
   id: string;
   type: string;
   mainClass: string;
+  inheritsFrom?: string;
+  jar?: string;
   minecraftArguments?: string;
   arguments?: {
     game: any[];
@@ -45,6 +47,7 @@ export interface VersionDetails {
 
 export interface Library {
   name: string;
+  url?: string;
   downloads?: {
     artifact?: {
       path: string;
@@ -85,11 +88,11 @@ export class MinecraftService {
   private getDefaultMinecraftDir(): string {
     const platform = process.platform;
     if (platform === 'win32') {
-      return path.join(app.getPath('appData'), '.minecraft');
+      return path.join(getAppPathSafe('appData'), '.minecraft');
     } else if (platform === 'darwin') {
-      return path.join(app.getPath('home'), 'Library', 'Application Support', 'minecraft');
+      return path.join(getAppPathSafe('home'), 'Library', 'Application Support', 'minecraft');
     } else {
-      return path.join(app.getPath('home'), '.minecraft');
+      return path.join(getAppPathSafe('home'), '.minecraft');
     }
   }
 
@@ -128,6 +131,69 @@ export class MinecraftService {
   async getVersionDetails(version: MinecraftVersion): Promise<VersionDetails> {
     const response = await axios.get<VersionDetails>(version.url);
     return response.data;
+  }
+
+  async getLocalVersionDetails(versionId: string): Promise<VersionDetails> {
+    const details = await this.readLocalVersionJson(versionId);
+    return await this.resolveVersionInheritance(details);
+  }
+
+  private async readLocalVersionJson(versionId: string): Promise<VersionDetails> {
+    const versionDir = path.join(this.minecraftDir, 'versions', versionId);
+    const jsonPath = path.join(versionDir, `${versionId}.json`);
+    if (!fs.existsSync(jsonPath)) {
+      throw new Error(`Version ${versionId} is not installed`);
+    }
+    return JSON.parse(await fs.promises.readFile(jsonPath, 'utf-8'));
+  }
+
+  private async resolveVersionInheritance(details: VersionDetails): Promise<VersionDetails> {
+    if (!details.inheritsFrom) {
+      return details;
+    }
+
+    const parent = await this.readLocalVersionJson(details.inheritsFrom);
+    const resolvedParent = await this.resolveVersionInheritance(parent);
+
+    return this.mergeVersionDetails(resolvedParent, details);
+  }
+
+  private mergeVersionDetails(parent: VersionDetails, child: VersionDetails): VersionDetails {
+    const mergedArguments = this.mergeArguments(parent.arguments, child.arguments);
+    const mergedMinecraftArgs = this.mergeMinecraftArguments(
+      parent.minecraftArguments,
+      child.minecraftArguments
+    );
+
+    return {
+      ...parent,
+      ...child,
+      id: child.id,
+      minecraftArguments: mergedMinecraftArgs,
+      arguments: mergedArguments,
+      libraries: [...(parent.libraries || []), ...(child.libraries || [])],
+    };
+  }
+
+  private mergeArguments(
+    parent?: { game: any[]; jvm: any[] },
+    child?: { game: any[]; jvm: any[] }
+  ): { game: any[]; jvm: any[] } | undefined {
+    const game = [...(parent?.game || []), ...(child?.game || [])];
+    const jvm = [...(parent?.jvm || []), ...(child?.jvm || [])];
+
+    if (game.length === 0 && jvm.length === 0) {
+      return undefined;
+    }
+
+    return { game, jvm };
+  }
+
+  private mergeMinecraftArguments(parent?: string, child?: string): string | undefined {
+    if (parent && child) {
+      return `${parent} ${child}`.trim();
+    }
+    return child || parent;
   }
 
   async isVersionInstalled(versionId: string): Promise<boolean> {
@@ -197,16 +263,24 @@ export class MinecraftService {
     for (const lib of details.libraries) {
       if (!this.shouldIncludeLibrary(lib)) continue;
 
-      if (lib.downloads?.artifact) {
-        const artifact = lib.downloads.artifact;
-        const filePath = path.join(libDir, artifact.path);
+      const artifactInfo = this.getLibraryArtifactInfo(lib);
+      if (artifactInfo) {
+        const filePath = path.join(libDir, artifactInfo.path);
+        const hasValidHash = artifactInfo.sha1
+          ? await this.verifyFile(filePath, artifactInfo.sha1)
+          : fs.existsSync(filePath);
 
-        if (await this.verifyFile(filePath, artifact.sha1)) {
-          continue;
+        if (!hasValidHash) {
+          await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+          if (artifactInfo.url) {
+            await this.downloadFile(
+              artifactInfo.url,
+              filePath,
+              artifactInfo.size || 0,
+              path.basename(artifactInfo.path)
+            );
+          }
         }
-
-        await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-        await this.downloadFile(artifact.url, filePath, artifact.size, path.basename(artifact.path));
       }
 
       if (lib.natives && lib.downloads?.classifiers) {
@@ -310,10 +384,14 @@ export class MinecraftService {
 
     for (const lib of details.libraries) {
       if (!this.shouldIncludeLibrary(lib)) continue;
-      if (lib.downloads?.artifact) {
-        const filePath = path.join(this.minecraftDir, 'libraries', lib.downloads.artifact.path);
-        if (!await this.verifyFile(filePath, lib.downloads.artifact.sha1)) {
-          totalBytes += lib.downloads.artifact.size;
+      const artifactInfo = this.getLibraryArtifactInfo(lib);
+      if (artifactInfo) {
+        const filePath = path.join(this.minecraftDir, 'libraries', artifactInfo.path);
+        const hasValidHash = artifactInfo.sha1
+          ? await this.verifyFile(filePath, artifactInfo.sha1)
+          : fs.existsSync(filePath);
+        if (!hasValidHash) {
+          totalBytes += artifactInfo.size || 0;
           totalFiles++;
         }
       }
@@ -393,12 +471,14 @@ export class MinecraftService {
     for (const lib of details.libraries) {
       if (!this.shouldIncludeLibrary(lib)) continue;
 
-      if (lib.downloads?.artifact) {
-        paths.push(path.join(libDir, lib.downloads.artifact.path));
+      const artifactInfo = this.getLibraryArtifactInfo(lib);
+      if (artifactInfo) {
+        paths.push(path.join(libDir, artifactInfo.path));
       }
     }
 
-    const versionJar = path.join(this.minecraftDir, 'versions', details.id, `${details.id}.jar`);
+    const jarId = details.jar || details.id;
+    const versionJar = path.join(this.minecraftDir, 'versions', jarId, `${jarId}.jar`);
     paths.push(versionJar);
 
     return paths;
@@ -432,6 +512,55 @@ export class MinecraftService {
     }
 
     return nativesDir;
+  }
+
+  async ensureLibraries(details: VersionDetails, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
+    if (onProgress) this.progressCallback = onProgress;
+    this.downloadState.stage = 'KA¬tA¬phaneler indiriliyor';
+    await this.downloadLibraries(details);
+  }
+
+  private getLibraryArtifactInfo(
+    lib: Library
+  ): { path: string; url?: string; sha1?: string; size?: number } | null {
+    if (lib.downloads?.artifact) {
+      const artifact = lib.downloads.artifact;
+      return {
+        path: artifact.path,
+        url: artifact.url,
+        sha1: artifact.sha1,
+        size: artifact.size,
+      };
+    }
+
+    if (lib.name && lib.url) {
+      const maven = this.getMavenArtifactPath(lib.name);
+      if (!maven) return null;
+      const baseUrl = lib.url.endsWith('/') ? lib.url : `${lib.url}/`;
+      return {
+        path: maven,
+        url: `${baseUrl}${maven.replace(/\\/g, '/')}`,
+      };
+    }
+
+    return null;
+  }
+
+  private getMavenArtifactPath(name: string): string | null {
+    const parts = name.split(':');
+    if (parts.length < 3) return null;
+
+    const group = parts[0];
+    const artifact = parts[1];
+    const version = parts[2];
+    const classifier = parts[3];
+
+    const groupPath = group.replace(/\./g, '/');
+    const baseName = classifier
+      ? `${artifact}-${version}-${classifier}.jar`
+      : `${artifact}-${version}.jar`;
+
+    return path.join(groupPath, artifact, version, baseName);
   }
 }
 

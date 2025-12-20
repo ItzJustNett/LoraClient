@@ -60,7 +60,10 @@ class LoraClient {
     });
 
     if (isDev) {
-      this.mainWindow.loadURL('http://localhost:3000');
+      const devUrl = process.env.ELECTRON_START_URL || 'http://localhost:3000';
+      this.mainWindow.loadURL(devUrl).catch(() => {
+        return this.mainWindow?.loadFile(path.join(__dirname, '../renderer/index.html'));
+      });
       this.mainWindow.webContents.openDevTools();
     } else {
       this.mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -168,7 +171,13 @@ class LoraClient {
       if (!account) throw new Error('No account selected');
 
       const java = await javaService.detectJavaInstallations();
-      const recommendedJava = javaService.getRecommendedJava(java, profile.version);
+      let recommendedJava = javaService.getRecommendedJava(java, profile.version);
+      if (!recommendedJava) {
+        javaDownloadService.setProgressCallback((progress) => {
+          this.mainWindow?.webContents.send('download-progress', progress);
+        });
+        recommendedJava = await javaDownloadService.ensureJavaForMinecraft(profile.version);
+      }
       if (!recommendedJava) throw new Error('No compatible Java found');
 
       const isInstalled = await minecraftService.isVersionInstalled(profile.version);

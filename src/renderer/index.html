@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LoraClient - Modern Minecraft Launcher</title>
+    <script>
+      if (typeof global === 'undefined') { window.global = window; }
+      function showError(title, content) {
+        const root = document.getElementById('root');
+        if (root) {
+           // Keep existing content if we want, or replace. Replacing is safer to be seen.
+           // But let's append if possible? No, replace to be sure.
+           // But we might overwrite the spinner. That's good.
+           root.innerHTML = `
+            <div style="padding: 20px; color: red; background: #0f0f23; font-family: sans-serif; z-index: 9999; position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: auto;">
+              <h1>${title}</h1>
+              ${content}
+            </div>
+          `;
+        }
+      }
+
+      window.onerror = function(message, source, lineno, colno, error) {
+        showError('Runtime Error', `
+          <p>${message}</p>
+          <pre>${source}:${lineno}:${colno}</pre>
+          <pre>${error && error.stack ? error.stack : ''}</pre>
+        `);
+      };
+
+      window.addEventListener('error', function(event) {
+        if (event.target && (event.target.tagName === 'SCRIPT' || event.target.tagName === 'LINK')) {
+          showError('Resource Loading Error', `
+            <p>Failed to load resource: ${event.target.src || event.target.href}</p>
+          `);
+        }
+      }, true);
+    </script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', system-ui, sans-serif;
+            background: #0f0f23;
+            color: white;
+            overflow: hidden;
+        }
+        
+        #root {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        /* Loading spinner */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: #0f0f23;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #1a1a2e;
+            border-top: 3px solid #6366f1;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div class="loading">
+            <div class="spinner"></div>
+        </div>
+    </div>
+</body>
+</html>
